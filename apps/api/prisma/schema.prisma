@@ -1,0 +1,777 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid()) // 用户唯一标识
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name          String? // 用户显示名称
+  image         String? // 用户头像URL
+  email         String?   @unique // 主邮箱 (可选但唯一)
+  emailVerified DateTime? // 邮箱验证时间
+
+  // ================ 用户关系 ================
+  accounts             Account[]
+  sessions             Session[]
+  authenticators       Authenticator[]
+  publicKeys           UserPublicKey[]
+  organizationMembers  OrganizationMember[]
+  createdOrganizations Organization[]           @relation("CreatedBy")
+  sentInvitations      OrganizationInvitation[] @relation("InvitedBy")
+  receivedInvitations  OrganizationInvitation[] @relation("InvitedUser")
+  notifications        UserNotification[]
+
+  // Todo 任务相关关系
+  todos              Todo[]
+  todoLabels         TodoLabel[]
+  todoComments       TodoComment[]
+  todoShares         TodoShare[]    @relation("TodoShareAsSharer")
+  receivedTodoShares TodoShare[]    @relation("TodoShareAsReceiver")
+  todoReminders      TodoReminder[]
+  todoTemplates      TodoTemplate[]
+
+  // SRP 登录凭据
+  srpCredential UserSRPCredential?
+
+  // 端对端加密相关
+  trustedDevices         TrustedDevice[]
+  sharedKeys             SharedKey[]
+  Organization           Organization[]
+  OrganizationTodoMember OrganizationTodoMember[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Account {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  type              String // 账户类型："oauth", "credentials", "srp"
+  provider          String // 提供商："google", "github", "twitter", "facebook", "apple", "srp"
+  providerAccountId String // 提供商账户ID
+
+  // OAuth 令牌信息
+  refresh_token String? // 刷新令牌
+  access_token  String? // 访问令牌
+  expires_at    Int? // 令牌过期时间戳
+  token_type    String? // 令牌类型："Bearer"
+  scope         String? // 访问范围
+  id_token      String? // OpenID Connect ID 令牌
+  session_state String? // OAuth 会话状态
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId]) // 防止重复绑定
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessionToken String @unique // 会话令牌
+  userId       String
+  user         User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 端对端加密会话信息
+  deviceId        String? // 关联的可信设备ID
+  encryptionKeyId String? // 当前会话使用的加密密钥ID
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String // 验证标识符
+  token      String // 验证令牌
+  expires    DateTime // 令牌过期时间
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model Authenticator {
+  credentialID         String  @unique // WebAuthn 凭据 ID
+  providerAccountId    String // 账户标识
+  credentialPublicKey  String // 公钥
+  counter              Int // 使用计数器（防重放）
+  credentialDeviceType String // 设备类型
+  credentialBackedUp   Boolean // 是否有备份
+  transports           String? // 传输方式
+
+  userId String // 关联的用户 ID
+  User   User   @relation(fields: [userId], references: [id])
+
+  @@id([userId, credentialID]) // 复合主键
+  @@map("authenticators")
+}
+
+// SRP 登录凭据表
+model UserSRPCredential {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  username String @unique // SRP 用户名（可以是邮箱或自定义用户名）
+  salt     String // SRP salt (hex编码)
+  verifier String // SRP verifier (hex编码)
+
+  // SRP 参数（通常使用标准参数，但可以自定义）
+  groupId String @default("rfc5054_4096") // SRP group ID (如 "rfc5054_4096")
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([username])
+  @@map("user_srp_credentials")
+}
+
+// 密钥类型枚举
+enum KeyType {
+  RSA_2048 // RSA 2048位
+  RSA_4096 // RSA 4096位
+  ECDSA_P256 // ECDSA P-256
+  ECDSA_P384 // ECDSA P-384
+  X25519 // Curve25519 (用于密钥交换)
+  ED25519 // Ed25519 (用于签名)
+}
+
+// 密钥用途枚举
+enum KeyPurpose {
+  ENCRYPTION // 加密
+  SIGNING // 签名
+  KEY_EXCHANGE // 密钥交换
+  MASTER // 主密钥
+}
+
+// 用户公钥表（服务端只存储公钥）
+model UserPublicKey {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name    String // 密钥名称（如："主加密密钥", "设备签名密钥"）
+  keyType KeyType // 密钥类型
+  purpose KeyPurpose // 密钥用途
+
+  publicKey String // 公钥 (PEM格式) - 只存储公钥！
+
+  // 密钥指纹（用于验证和识别）
+  keyFingerprint String @unique // 公钥指纹（SHA256哈希）
+
+  isActive  Boolean   @default(true) // 是否激活
+  expiresAt DateTime? // 密钥过期时间
+
+  // 设备关联（可选）
+  deviceId String? // 关联的设备ID（如果是设备特定密钥）
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 密钥分享关系（基于公钥指纹）
+  sharedKeysAsOwner SharedKey[] @relation("KeyOwner")
+
+  @@index([userId, purpose])
+  @@index([userId, isActive])
+  @@index([keyFingerprint])
+  @@map("user_public_keys")
+}
+
+// 可信设备表
+model TrustedDevice {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deviceId   String  @unique // 设备唯一标识
+  deviceName String // 设备名称（如："iPhone 15", "MacBook Pro"）
+  deviceInfo String? // 设备信息（JSON格式，包含操作系统、浏览器等）
+
+  // 设备指纹
+  fingerprint String // 设备指纹
+
+  // 设备密钥（用于设备认证）
+  devicePublicKey String // 设备公钥
+
+  isActive   Boolean   @default(true) // 是否激活
+  lastUsedAt DateTime  @default(now()) // 最后使用时间
+  expiresAt  DateTime? // 设备信任过期时间
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+  @@index([deviceId])
+  @@map("trusted_devices")
+}
+
+// 密钥分享表（用于组织内部或用户间的密钥分享）
+model SharedKey {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 分享的密钥信息
+  publicKeyId String
+  publicKey   UserPublicKey @relation("KeyOwner", fields: [publicKeyId], references: [id], onDelete: Cascade)
+
+  // 接收方
+  recipientId String
+  recipient   User   @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  // 加密后的私钥（用接收方的公钥加密）
+  encryptedPrivateKey String
+
+  // 分享权限
+  canDecrypt Boolean @default(true) // 是否可以解密
+  canSign    Boolean @default(false) // 是否可以签名
+  canShare   Boolean @default(false) // 是否可以再次分享
+
+  // 分享范围（可选：限制在特定组织内）
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  expiresAt DateTime? // 分享过期时间
+  isActive  Boolean   @default(true)
+
+  @@unique([publicKeyId, recipientId]) // 同一公钥不能重复分享给同一用户
+  @@index([recipientId])
+  @@index([organizationId])
+  @@map("shared_keys")
+}
+
+// 组织
+model Organization {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name        String
+  slug        String  @unique // 组织唯一标识（URL友好）
+  description String? // 组织描述
+  logo        String? // 组织Logo URL
+  website     String? // 官网
+  maxMembers  Int? // 最大成员数限制
+
+  creatorId String
+  creator   User   @relation("CreatedBy", fields: [creatorId], references: [id])
+
+  OrganizationMember     OrganizationMember[]
+  OrganizationRole       OrganizationRole[]
+  OrganizationInvitation OrganizationInvitation[]
+
+  // 端对端加密：组织级别的密钥分享
+  sharedKeys       SharedKey[]
+  User             User?              @relation(fields: [userId], references: [id])
+  userId           String?
+  Todo             Todo[]
+  OrganizationTodo OrganizationTodo[]
+
+  @@index([creatorId])
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId         String
+  user           User             @relation(fields: [userId], references: [id])
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  roleId         String
+  role           OrganizationRole @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, organizationId]) // 同一用户在同一组织内只能有一个成员
+  @@index([userId])
+  @@index([organizationId])
+  @@map("organization_members")
+}
+
+model OrganizationRole {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name        String
+  description String?
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  OrganizationMember OrganizationMember[]
+
+  @@unique([organizationId, name]) // 同一组织内角色名称唯一
+  @@index([organizationId])
+  @@map("organization_roles")
+}
+
+// 邀请状态
+enum InvitationStatus {
+  PENDING // 待处理
+  ACCEPTED // 已接受
+  DECLINED // 已拒绝
+  EXPIRED // 已过期
+  CANCELLED // 已取消
+}
+
+model OrganizationInvitation {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  token     String           @unique // 邀请令牌
+  expiresAt DateTime // 邀请令牌过期时间
+  status    InvitationStatus @default(PENDING) // 邀请状态
+
+  inviterUserId String // 邀请者ID，不设外键关联以保留历史记录完整性
+  inviterEmail  String? // 邀请者邮箱（用于显示）
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  invitedUserId String?
+  invitedUser   User?   @relation("InvitedUser", fields: [invitedUserId], references: [id])
+
+  inviterUser User @relation("InvitedBy", fields: [inviterUserId], references: [id])
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("organization_invitations")
+}
+
+// 通知类型
+enum NotificationType {
+  ORGANIZATION_INVITATION // 组织邀请
+  ORGANIZATION_MEMBER_JOINED // 成员加入组织
+  ORGANIZATION_MEMBER_LEFT // 成员离开组织
+  SYSTEM_ANNOUNCEMENT // 系统公告
+  ACCOUNT_SECURITY // 账户安全
+  KEY_SHARED // 密钥分享
+  DEVICE_ADDED // 新设备添加
+  OTHER // 其他
+}
+
+// 通知优先级
+enum NotificationPriority {
+  LOW // 低优先级
+  NORMAL // 普通
+  HIGH // 高优先级
+  URGENT // 紧急
+}
+
+// 用户通知表
+model UserNotification {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  type     NotificationType     @default(OTHER) // 通知类型
+  priority NotificationPriority @default(NORMAL) // 优先级
+
+  title   String // 通知标题
+  content String // 通知内容
+  data    String? // 额外数据（JSON格式）
+
+  isRead Boolean   @default(false) // 是否已读
+  readAt DateTime? // 读取时间
+
+  // 可选的操作链接
+  actionUrl  String? // 操作链接
+  actionText String? // 操作按钮文本
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead]) // 用于查询用户未读通知
+  @@index([createdAt]) // 用于按时间排序
+  @@map("user_notifications")
+}
+
+// =================== Todo 任务管理系统 ===================
+
+// 任务状态枚举
+enum TodoStatus {
+  PENDING // 待处理
+  IN_PROGRESS // 进行中
+  COMPLETED // 已完成
+  CANCELLED // 已取消
+}
+
+// 任务优先级枚举
+enum TodoPriority {
+  LOW // 低优先级
+  MEDIUM // 中等优先级
+  HIGH // 高优先级
+  URGENT // 紧急
+}
+
+// Todo 任务表（混合加密策略）
+model Todo {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 高频访问字段：独立加密（用于列表显示等）
+  encryptedTitle String // 加密的任务标题
+  titleNonce     String // 标题加密随机数
+
+  // 低频详情字段：统一加密存储
+  encryptedDetails String? // JSON: {"description": "...", "notes": "...", "customFields": {...}}
+  detailsNonce     String? // 详情加密随机数
+
+  // 非敏感的元数据（明文存储，用于查询和排序）
+  status      TodoStatus   @default(PENDING)
+  priority    TodoPriority @default(MEDIUM)
+  dueDate     DateTime? // 截止日期
+  completedAt DateTime? // 完成时间
+
+  // 任务估算和追踪（明文存储，用于统计）
+  estimatedMinutes Int? // 预估用时（分钟）
+  actualMinutes    Int? // 实际用时（分钟）
+
+  // 统一加密参数
+  encryptionKeyId String // 用于加密此任务的密钥ID
+
+  // 任务归属
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 子任务关系
+  parentId String?
+  parent   Todo?   @relation("TodoSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks Todo[]  @relation("TodoSubtasks")
+
+  // 任务标签（多对多关系）
+  labels TodoLabel[]
+
+  // 任务评论
+  comments TodoComment[]
+
+  // 任务分享
+  shares TodoShare[]
+
+  // 任务提醒
+  reminders         TodoReminder[]
+  Organization      Organization?       @relation(fields: [organizationId], references: [id])
+  organizationId    String?
+  OrganizationTodo  OrganizationTodo[]
+  TodoStatusHistory TodoStatusHistory[]
+
+  @@index([userId, status])
+  @@index([userId, dueDate])
+  @@index([userId, priority])
+  @@index([userId, createdAt])
+  @@index([parentId])
+  @@map("todos")
+}
+
+// Todo 标签表（混合加密策略）
+model TodoLabel {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 高频访问字段：独立加密
+  encryptedName String // 加密的标签名称
+  nameNonce     String // 名称加密随机数
+
+  // 低频详情字段：统一加密
+  encryptedDetails String? // JSON: {"color": "#ff0000", "description": "...", "icon": "..."}
+  detailsNonce     String? // 详情加密随机数
+
+  // 统一加密参数
+  encryptionKeyId String // 用于加密此标签的密钥ID
+
+  // 标签归属
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 与任务的关联
+  todos Todo[]
+
+  @@unique([userId, encryptedName]) // 同一用户下标签名称唯一（加密后）
+  @@index([userId])
+  @@map("todo_labels")
+}
+
+// Todo 评论表（混合加密策略）
+model TodoComment {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 高频访问字段：独立加密
+  encryptedContent String // 加密的评论内容
+  contentNonce     String // 内容加密随机数
+
+  // 低频详情字段：统一加密
+  encryptedDetails String? // JSON: {"attachments": [...], "mentions": [...], "metadata": {...}}
+  detailsNonce     String? // 详情加密随机数
+
+  // 统一加密参数
+  encryptionKeyId String // 用于加密此评论的密钥ID
+
+  // 软删除支持
+  deletedAt DateTime? // 删除时间
+  isDeleted Boolean   @default(false) // 是否已删除
+
+  // 评论归属
+  todoId String
+  todo   Todo   @relation(fields: [todoId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([todoId, isDeleted])
+  @@index([userId, isDeleted])
+  @@index([todoId, createdAt])
+  @@map("todo_comments")
+}
+
+// 组织Todo可见性枚举
+enum OrgTodoVisibility {
+  PRIVATE // 私人可见（仅创建者）
+  TEAM // 团队可见（组织内所有成员）
+  ADMINS_ONLY // 仅管理员可见
+  PUBLIC // 公开可见
+}
+
+// 组织Todo角色枚举
+enum OrgTodoRole {
+  OWNER // 拥有者
+  ASSIGNEE // 被分配者
+  REVIEWER // 审核者
+  OBSERVER // 观察者
+}
+
+// 组织Todo关联表
+model OrganizationTodo {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 关联的任务
+  todoId String
+  todo   Todo   @relation(fields: [todoId], references: [id], onDelete: Cascade)
+
+  // 关联的组织（团队）
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // 可见性设置
+  visibility OrgTodoVisibility @default(TEAM)
+
+  // 是否为组织的共同任务
+  isSharedTodo Boolean @default(false) // true表示这是整个团队的任务
+
+  // 组织内的角色
+  role OrgTodoRole @default(ASSIGNEE)
+
+  // 组织内优先级（用于排序）
+  organizationPriority Int @default(0)
+
+  // 截止日期（可能与个人任务不同）
+  organizationDueDate DateTime?
+
+  // 组织成员参与记录
+  members OrganizationTodoMember[]
+
+  @@unique([todoId, organizationId]) // 同一任务不能重复添加到同一组织
+  @@index([organizationId, visibility])
+  @@index([organizationId, isSharedTodo])
+  @@map("organization_todos")
+}
+
+// 组织Todo成员表（记录组织成员对任务的参与情况）
+model OrganizationTodoMember {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 关联的组织任务
+  orgTodoId String
+  orgTodo   OrganizationTodo @relation(fields: [orgTodoId], references: [id], onDelete: Cascade)
+
+  // 在此任务中的角色
+  role OrgTodoRole @default(ASSIGNEE)
+
+  // 是否接收提醒
+  receiveReminders Boolean @default(true)
+
+  // 任务状态（成员视角）
+  memberStatus TodoStatus @default(PENDING)
+
+  // 成员完成时间
+  memberCompletedAt DateTime?
+
+  // 参与状态
+  isActive Boolean @default(true) // 是否激活参与
+  User     User?   @relation(fields: [userId], references: [id])
+  userId   String?
+
+  @@unique([orgTodoId, userId]) // 同一组织任务每个成员只能有一条记录
+  @@index([orgTodoId, role])
+  @@map("organization_todo_members")
+}
+
+// Todo 分享表（端对端加密分享）
+model TodoShare {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 分享的任务
+  todoId String
+  todo   Todo   @relation(fields: [todoId], references: [id], onDelete: Cascade)
+
+  // 分享者
+  sharerId String
+  sharer   User   @relation("TodoShareAsSharer", fields: [sharerId], references: [id], onDelete: Cascade)
+
+  // 被分享者
+  sharedWithId String
+  sharedWith   User   @relation("TodoShareAsReceiver", fields: [sharedWithId], references: [id], onDelete: Cascade)
+
+  // 加密的密钥信息（使用被分享者的公钥加密）
+  encryptedKey String // 使用被分享者公钥加密的任务密钥
+  keyId        String // 用于加密的公钥ID
+
+  // 分享权限
+  canEdit Boolean @default(false) // 是否可以编辑
+  canView Boolean @default(true) // 是否可以查看
+
+  // 分享状态
+  isActive  Boolean   @default(true) // 分享是否激活
+  expiresAt DateTime? // 分享过期时间
+
+  @@unique([todoId, sharedWithId]) // 同一任务不能重复分享给同一人
+  @@index([sharerId])
+  @@index([sharedWithId])
+  @@index([todoId])
+  @@map("todo_shares")
+}
+
+// 提醒状态枚举
+enum ReminderStatus {
+  PENDING // 待发送
+  SENT // 已发送
+  READ // 已阅读
+  SNOOZED // 已暂停
+}
+
+// Todo 提醒表
+model TodoReminder {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 提醒时间（合并为一个字段）
+  reminderDateTime DateTime // 提醒日期和时间
+
+  // 重复提醒支持
+  recurringPattern String? // JSON: {"type": "daily", "interval": 1, "endDate": "2024-12-31"}
+  nextReminderAt   DateTime? // 下次提醒时间（用于重复提醒）
+
+  // 提醒内容
+  title   String // 提醒标题
+  message String? // 提醒消息
+
+  // 提醒类型
+  reminderType String @default("DEADLINE") // DEADLINE, CUSTOM, FOLLOWUP
+
+  // 提醒状态
+  status      ReminderStatus @default(PENDING)
+  sentAt      DateTime? // 发送时间
+  readAt      DateTime? // 阅读时间
+  snoozedAt   DateTime? // 暂停时间
+  snoozeUntil DateTime? // 暂停到什么时候
+
+  // 关联任务
+  todoId String
+  todo   Todo   @relation(fields: [todoId], references: [id], onDelete: Cascade)
+
+  // 提醒用户
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, reminderDateTime, status])
+  @@index([todoId])
+  @@index([reminderDateTime, status]) // 用于查找需要发送的提醒
+  @@index([nextReminderAt, status]) // 用于重复提醒
+  @@map("todo_reminders")
+}
+
+// Todo 模板表（用户可以保存常用的任务模板）
+model TodoTemplate {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 加密的模板数据
+  encryptedName        String // 加密的模板名称
+  encryptedDescription String? // 加密的模板描述
+  encryptedTitle       String // 加密的任务标题模板
+  encryptedNotes       String? // 加密的备注模板
+
+  // 模板默认设置
+  defaultPriority      TodoPriority @default(MEDIUM)
+  defaultEstimatedTime Int? // 默认预计用时（分钟）
+
+  // 加密相关
+  encryptionKeyId String // 用于加密此模板的密钥ID
+  nonce           String // 加密随机数
+
+  // 模板归属
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 使用统计
+  usageCount Int       @default(0) // 使用次数
+  lastUsedAt DateTime? // 最后使用时间
+
+  @@index([userId, lastUsedAt])
+  @@index([userId, usageCount])
+  @@map("todo_templates")
+}
+
+// 任务状态变更历史表
+model TodoStatusHistory {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  // 状态变更信息
+  todoId     String
+  fromStatus TodoStatus? // 原状态（创建时为null）
+  toStatus   TodoStatus // 新状态
+
+  // 变更人和原因
+  changedBy String // 操作用户ID
+  reason    String? // 变更原因
+  comment   String? // 变更备注
+
+  // 关系定义
+  todo Todo @relation(fields: [todoId], references: [id], onDelete: Cascade)
+
+  @@index([todoId, createdAt])
+  @@index([changedBy])
+  @@map("todo_status_history")
+}

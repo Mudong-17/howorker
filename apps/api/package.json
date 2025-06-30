@@ -1,0 +1,21 @@
+{
+  "name": "api",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "db:migrate": "cross-env PRISMA_LOCAL_MIGRATION=true bunx prisma migrate dev",
+    "dev:d1": "bun run scripts/apply-to-d1.js",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+  },
+  "dependencies": {
+    "@prisma/adapter-d1": "^6.10.1",
+    "@prisma/client": "^6.10.1",
+    "hono": "^4.8.3",
+    "secure-remote-password": "^0.3.1"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "prisma": "^6.10.1",
+    "wrangler": "^4.4.0"
+  }
+}

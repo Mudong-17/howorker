@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-25",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "JWT_SECRET": "your-jwt-secret-key-here"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "CONFIG_KV",
+      "id": "your-kv-namespace-id-here"
+    } 
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "howorker",
+      "database_id": "your-d1-database-id-here"
+    }
+  ]
+} 
